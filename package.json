@@ -1,0 +1,27 @@
+{
+  "name": "qa-automation-tool",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Aggressive autonomous QA and security testing agent for recruitment SaaS",
+  "scripts": {
+    "test": "ts-node testRunner.ts",
+    "test:local": "ts-node testRunner.ts --env=local",
+    "test:stage": "ts-node testRunner.ts --env=stage",
+    "test:prod": "ts-node testRunner.ts --env=prod",
+    "test:security": "ts-node testRunner.ts --env=local --only=attacks",
+    "test:flows": "ts-node testRunner.ts --env=local --only=flows",
+    "test:perf": "ts-node testRunner.ts --env=stage --only=performance",
+    "report": "node -e \"const fs=require('fs');const path=require('path');const {exec}=require('child_process');const d=new Date().toISOString().slice(0,10);const p=path.join('reports',d,'report.html');if(!fs.existsSync(p)){console.error('Report not found:',p);process.exit(1);}const cmd=process.platform==='win32'?`start \\\"\\\" \\\"${p}\\\"`:process.platform==='darwin'?`open \\\"${p}\\\"`:`xdg-open \\\"${p}\\\"`;exec(cmd);\""
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "jsondiffpatch": "^0.7.3",
+    "playwright": "^1.51.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.2"
+  }
+}
