@@ -23,6 +23,7 @@ export function loadConfig(envName: EnvName): AppConfig {
   dotenv.config({ path: envFile, override: true });
   const raw = {
     baseURL: process.env.BASE_URL,
+    apiBaseURL: process.env.API_BASE_URL,
     apiBasePath: process.env.API_BASE_PATH,
     slowThresholdMs: Number(process.env.SLOW_THRESHOLD_MS ?? 2000),
     credentials: {

@@ -1,10 +1,8 @@
-import { defineConfig } from 'playwright';
-
 /**
  * Base Playwright configuration for autonomous flow and attack execution.
  * Environment-specific logic remains in testRunner.ts.
  */
-export default defineConfig({
+export default {
   testDir: './',
   timeout: 120_000,
   expect: { timeout: 15_000 },
@@ -21,4 +19,4 @@ export default defineConfig({
     trace: 'retain-on-failure',
     video: 'off'
   }
-});
+};

@@ -1,80 +1,114 @@
-import path from 'node:path';
 import { Page } from 'playwright';
-import { Logger } from '../utils/logger';
-import { EvidencePaths } from '../utils/evidence';
-import { StepResult } from '../utils/report';
+import { Logger, Severity } from '../utils/logger';
+import { EvidencePaths, captureFailureEvidence, saveJsonEvidence } from '../utils/evidence';
 import { ConsoleEvent } from '../watchers/console.watcher';
-import { NetworkEvent } from '../watchers/network.watcher';
+import { NetworkIssue } from '../watchers/network.watcher';
 
-export type EdgeCaseOptions = {
+export type EdgeCaseResult = {
+  role: string;
+  flow: string;
+  field: string;
+  caseLabel: string;
+  severity: Severity;
+  details: string;
+  screenshotPath?: string;
+  htmlPath?: string;
+};
+
+export type InputEdgeOptions = {
+  role: string;
   flow: string;
   submitSelector: string;
   errorSelector?: string;
   logger: Logger;
   evidenceDirs: EvidencePaths;
   getConsoleLogs: () => ConsoleEvent[];
-  getNetworkIssues: () => NetworkEvent[];
+  getNetworkIssues: () => NetworkIssue[];
 };
 
-const CASES = [
+const INPUT_CASES = [
   { label: 'empty', value: '' },
+  { label: 'whitespace only', value: '   ' },
   { label: 'long string', value: 'a'.repeat(1000) },
-  { label: 'special chars', value: `!@#$%^&*()_+-=[]{}|;':",.<>?` },
-  { label: 'xss attempt', value: '<script>alert(1)</script>' },
-  { label: 'sql injection', value: `' OR 1=1 --` },
-  { label: 'negative num', value: '-999' },
-  { label: 'large num', value: '99999999999' },
-  { label: 'invalid email', value: 'notanemail@@' }
+  { label: 'special chars', value: `!@#$%^&*()<>?{}[]` },
+  { label: 'xss basic', value: '<script>alert(1)</script>' },
+  { label: 'xss img', value: '<img src=x onerror=alert(1)>' },
+  { label: 'sql injection', value: `' OR '1'='1` },
+  { label: 'sql drop', value: `'; DROP TABLE users; --` },
+  { label: 'unicode overflow', value: '𝕳𝖊𝖑𝖑𝖔'.repeat(200) },
+  { label: 'null byte', value: 'test\x00injection' },
+  { label: 'negative number', value: '-99999' },
+  { label: 'float overflow', value: '99999999999.999999' },
+  { label: 'invalid email', value: 'a@@b..c' },
+  { label: 'html entity', value: '&lt;script&gt;alert(1)&lt;/script&gt;' }
 ] as const;
 
-/** Runs deterministic edge-case inputs and records result/evidence per case. */
-export async function runEdgeCases(page: Page, selector: string, options: EdgeCaseOptions): Promise<StepResult[]> {
-  const results: StepResult[] = [];
-  for (const testCase of CASES) {
-    const step = `edge:${testCase.label}`;
-    options.logger.info(options.flow, step, `Testing value length=${testCase.value.length}`);
-    const c0 = options.getConsoleLogs().length;
-    const n0 = options.getNetworkIssues().length;
-    await page.locator(selector).fill(testCase.value);
-    await page.locator(options.submitSelector).click();
-    await page.waitForLoadState('networkidle');
-    const uiError = await readVisibleError(page, options.errorSelector);
-    const newConsole = options.getConsoleLogs().slice(c0);
-    const newNetwork = options.getNetworkIssues().slice(n0);
-    const screenshotPath = await saveCaseScreenshot(page, options.evidenceDirs, testCase.label);
-    const status = classify(uiError, newConsole.length, newNetwork.length);
-    const details = formatDetails(uiError, newConsole.length, newNetwork.length);
-    results.push({ flow: options.flow, step, status, details, screenshotPath });
+/** Discovers visible inputs and runs the full edge-case matrix per field. */
+export async function runInputEdgeCases(page: Page, options: InputEdgeOptions): Promise<EdgeCaseResult[]> {
+  const results: EdgeCaseResult[] = [];
+  const fields = await discoverFields(page);
+  for (const field of fields) {
+    for (const item of INPUT_CASES) {
+      const result = await runSingleCase(page, field, item.label, item.value, options);
+      results.push(result);
+    }
   }
 
   return results;
 }
 
-/** Reads first visible validation error if selector is provided and visible. */
+/** Collects usable input selectors from visible form controls. */
+async function discoverFields(page: Page): Promise<string[]> {
+  const selectors = await page.locator('form input, form textarea').evaluateAll((nodes) => {
+    return nodes
+      .map((n) => {
+        const el = n as HTMLInputElement | HTMLTextAreaElement;
+        if (el.type === 'hidden' || el.disabled) return '';
+        return el.id ? `#${el.id}` : el.name ? `[name="${el.name}"]` : '';
+      })
+      .filter(Boolean);
+  });
+  return Array.from(new Set(selectors));
+}
+
+/** Executes one edge case on one input and captures evidence on failure levels. */
+async function runSingleCase(
+  page: Page,
+  field: string,
+  caseLabel: string,
+  value: string,
+  options: InputEdgeOptions
+): Promise<EdgeCaseResult> {
+  const step = `edge:${field}:${caseLabel}`;
+  options.logger.info(options.role, options.flow, step, `Running value length=${value.length}`);
+  const c0 = options.getConsoleLogs().length;
+  const n0 = options.getNetworkIssues().length;
+  await page.locator(field).fill(value);
+  await page.locator(options.submitSelector).click();
+  await page.waitForLoadState('networkidle');
+  const uiError = await readVisibleError(page, options.errorSelector);
+  const consoleCount = options.getConsoleLogs().slice(c0).length;
+  const networkCount = options.getNetworkIssues().slice(n0).length;
+  const severity = classify(uiError, consoleCount, networkCount);
+  const details = `uiError=${uiError || 'none'}, console=${consoleCount}, network=${networkCount}`;
+  if (severity === 'PASS' || severity === 'INFO') return { role: options.role, flow: options.flow, field, caseLabel, severity, details };
+  const evidence = await captureFailureEvidence(page, options.evidenceDirs, `${options.flow}-${caseLabel}`);
+  saveJsonEvidence(options.evidenceDirs, `${options.flow}-${caseLabel}-context`, { field, caseLabel, value: value.slice(0, 250), details });
+  return { role: options.role, flow: options.flow, field, caseLabel, severity, details, screenshotPath: evidence.screenshotPath, htmlPath: evidence.htmlPath };
+}
+
+/** Reads the first visible validation message for the submitted form. */
 async function readVisibleError(page: Page, errorSelector?: string): Promise<string> {
   if (!errorSelector) return '';
-  const el = page.locator(errorSelector).first();
-  if (!(await el.isVisible().catch(() => false))) return '';
-  return (await el.textContent())?.trim() ?? '';
+  const alert = page.locator(errorSelector).first();
+  const visible = await alert.isVisible().catch(() => false);
+  if (!visible) return '';
+  return (await alert.textContent())?.trim() ?? '';
 }
 
-/** Saves a screenshot for each edge case under daily screenshot directory. */
-async function saveCaseScreenshot(page: Page, dirs: EvidencePaths, label: string): Promise<string> {
-  const name = `${label.replace(/\s+/g, '-')}-${new Date().toISOString().replace(/[.:]/g, '-')}.png`;
-  const screenshotPath = path.join(dirs.screenshotsDir, name);
-  await page.screenshot({ path: screenshotPath, fullPage: true });
-  return screenshotPath;
-}
-
-/** Converts observed signals into PASS/WARN/FAIL outcome. */
-function classify(uiError: string, consoleCount: number, networkCount: number): 'PASS' | 'WARN' | 'FAIL' {
+/** Maps observed behavior into severity levels for reporting. */
+function classify(uiError: string, consoleCount: number, networkCount: number): Severity {
   if (consoleCount > 0 || networkCount > 0) return 'FAIL';
   if (uiError) return 'PASS';
   return 'WARN';
-}
-
-/** Formats concise per-case diagnostics for the final report table. */
-function formatDetails(uiError: string, consoleCount: number, networkCount: number): string {
-  const bits = [`uiError=${uiError || 'none'}`, `console=${consoleCount}`, `network=${networkCount}`];
-  return bits.join(', ');
 }

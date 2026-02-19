@@ -23,6 +23,7 @@ const credentialsSchema = z.object({
 /** Runtime application config schema. */
 export const appConfigSchema = z.object({
   baseURL: z.string().url(),
+  apiBaseURL: z.string().url().optional(),
   apiBasePath: z.string().min(1),
   slowThresholdMs: z.number().int().positive().default(2000),
   credentials: credentialsSchema
